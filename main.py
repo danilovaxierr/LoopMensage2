@@ -1,16 +1,92 @@
 import asyncio
 import os
 import logging
+from datetime import datetime
+
+import aioschedule
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from aiogram.filters import Command
 from dotenv import load_dotenv
-import aioschedule
-from datetime import datetime load_dotenvTOKEN = os.getenv("BOT_TOKEN")
+
+load_dotenv()
+
+TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "-1001234567890"))
-MESSAGES = ["💎 Loop 1", "🔥 Loop 2", "🚀 Loop 3"] logging.basicConfig(level=logging.INFO)
+
+MESSAGES = [
+    "💎 Loop 1",
+    "🔥 Loop 2",
+    "🚀 Loop 3"
+]
+
+logging.basicConfig(level=logging.INFO)
+
 bot = Bot(token=TOKEN)
-dp = Dispatcher@dp.message(Command("start"))
-async def start(msg: Message): await msg.answer("🚀 **LoopBot v4 UP!** /loop") @dp.message(Command("loop"))
-async def loop(msg: Message): await msg.answer("🔄 **Loops ON!** /stop") asyncio.create_task(run_scheduler) async def send_message: try: msg = MESSAGES[datetime.now.minute % 3] await bot.send_message(chat_id=TARGET_CHAT_ID, text=msg) logging.info("✅ Msg enviada!") except Exception as e: logging.error(f"❌ Erro: {e}") async def run_scheduler: aioschedule.every(5).minutes.do(send_message) while True: aioschedule.run_pendingawait asyncio.sleep(1) @dp.message(Command("stop"))
-async def stop(msg: Message): aioschedule.clearawait msg.answer("⏹️ **Loops OFF!**") async def main: await dp.start_polling(bot) if __name__ == "__main__": asyncio.run(main)
+dp = Dispatcher()
+
+scheduler_task = None
+
+
+@dp.message(Command("start"))
+async def start(msg: Message):
+    await msg.answer("🚀 LoopBot v4 UP! Use /loop")
+
+
+async def send_message():
+    try:
+        index = datetime.now().minute % len(MESSAGES)
+        text = MESSAGES[index]
+
+        await bot.send_message(
+            chat_id=TARGET_CHAT_ID,
+            text=text
+        )
+
+        logging.info("✅ Msg enviada!")
+
+    except Exception as e:
+        logging.error(f"❌ Erro: {e}")
+
+
+async def run_scheduler():
+    aioschedule.every(5).minutes.do(send_message)
+
+    while True:
+        await aioschedule.run_pending()
+        await asyncio.sleep(1)
+
+
+@dp.message(Command("loop"))
+async def loop(msg: Message):
+    global scheduler_task
+
+    if scheduler_task is None or scheduler_task.done():
+        scheduler_task = asyncio.create_task(run_scheduler())
+        await msg.answer("🔄 Loops ON! Use /stop")
+    else:
+        await msg.answer("⚠️ O loop já está ligado.")
+
+
+@dp.message(Command("stop"))
+async def stop(msg: Message):
+    global scheduler_task
+
+    aioschedule.clear()
+
+    if scheduler_task:
+        scheduler_task.cancel()
+        scheduler_task = None
+
+    await msg.answer("⏹️ Loops OFF!")
+
+
+async def main():
+    if not TOKEN:
+        raise ValueError("BOT_TOKEN não encontrado no .env")
+
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
