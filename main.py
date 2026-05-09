@@ -1,16 +1,15 @@
-import asyncio
 import os
+import time
+import json
 import logging
+import asyncio
+import urllib.request
+import urllib.parse
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
-import aioschedule
-from aiohttp import web
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message
-from aiogram.filters import Command
-from dotenv import load_dotenv
-
-load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "-1001234567890"))
@@ -21,92 +20,149 @@ MESSAGES = [
     "🚀 Loop 3"
 ]
 
-logging.basicConfig(level=logging.INFO)
-
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
-
-scheduler_task = None
+loop_ativo = False
+last_update_id = 0
 
 
-@dp.message(Command("start"))
-async def start(msg: Message):
-    await msg.answer("🚀 LoopBot v4 UP! Use /loop")
+def carregar_env_local():
+    """
+    Lê o arquivo .env quando estiver rodando no PC.
+    No Render, ele usa as Environment Variables.
+    """
+    if not os.path.exists(".env"):
+        return
+
+    with open(".env", "r", encoding="utf-8") as f:
+        for linha in f:
+            linha = linha.strip()
+            if not linha or linha.startswith("#") or "=" not in linha:
+                continue
+
+            chave, valor = linha.split("=", 1)
+            os.environ.setdefault(chave.strip(), valor.strip())
 
 
-async def send_message():
+def telegram_request(method, params=None):
+    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
+
+    if params:
+        data = urllib.parse.urlencode(params).encode()
+    else:
+        data = None
+
+    req = urllib.request.Request(url, data=data)
+
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode())
+
+
+def send_text(chat_id, text):
     try:
-        index = datetime.now().minute % len(MESSAGES)
-        text = MESSAGES[index]
-
-        await bot.send_message(
-            chat_id=TARGET_CHAT_ID,
-            text=text
-        )
-
-        logging.info("✅ Msg enviada!")
-
+        telegram_request("sendMessage", {
+            "chat_id": chat_id,
+            "text": text
+        })
     except Exception as e:
-        logging.error(f"❌ Erro: {e}")
+        logging.error(f"Erro ao enviar mensagem: {e}")
 
 
-async def run_scheduler():
-    aioschedule.every(5).minutes.do(send_message)
+async def enviar_loop():
+    global loop_ativo
 
     while True:
-        await aioschedule.run_pending()
-        await asyncio.sleep(1)
+        if loop_ativo:
+            try:
+                index = datetime.now().minute % len(MESSAGES)
+                text = MESSAGES[index]
+
+                send_text(TARGET_CHAT_ID, text)
+                logging.info("✅ Msg enviada!")
+
+            except Exception as e:
+                logging.error(f"❌ Erro no loop: {e}")
+
+        await asyncio.sleep(300)
 
 
-@dp.message(Command("loop"))
-async def loop(msg: Message):
-    global scheduler_task
+async def polling():
+    global last_update_id
+    global loop_ativo
 
-    if scheduler_task is None or scheduler_task.done():
-        scheduler_task = asyncio.create_task(run_scheduler())
-        await msg.answer("🔄 Loops ON! Use /stop")
-    else:
-        await msg.answer("⚠️ O loop já está ligado.")
+    logging.info("🤖 Bot iniciado em polling")
+
+    while True:
+        try:
+            result = telegram_request("getUpdates", {
+                "offset": last_update_id + 1,
+                "timeout": 25
+            })
+
+            updates = result.get("result", [])
+
+            for update in updates:
+                last_update_id = update["update_id"]
+
+                message = update.get("message")
+                if not message:
+                    continue
+
+                chat_id = message["chat"]["id"]
+                text = message.get("text", "")
+
+                if text.startswith("/start"):
+                    send_text(chat_id, "🚀 LoopBot v4 UP! Use /loop")
+
+                elif text.startswith("/loop"):
+                    if not loop_ativo:
+                        loop_ativo = True
+                        send_text(chat_id, "🔄 Loops ON! Use /stop")
+                    else:
+                        send_text(chat_id, "⚠️ O loop já está ligado.")
+
+                elif text.startswith("/stop"):
+                    loop_ativo = False
+                    send_text(chat_id, "⏹️ Loops OFF!")
+
+        except Exception as e:
+            logging.error(f"Erro no polling: {e}")
+            await asyncio.sleep(5)
 
 
-@dp.message(Command("stop"))
-async def stop(msg: Message):
-    global scheduler_task
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot online!")
 
-    aioschedule.clear()
-
-    if scheduler_task:
-        scheduler_task.cancel()
-        scheduler_task = None
-
-    await msg.answer("⏹️ Loops OFF!")
+    def log_message(self, format, *args):
+        return
 
 
-async def health(request):
-    return web.Response(text="Bot online!")
-
-
-async def start_webserver():
-    app = web.Application()
-    app.router.add_get("/", health)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
+def start_webserver():
     port = int(os.getenv("PORT", 10000))
-
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
     logging.info(f"🌐 Web server rodando na porta {port}")
+    server.serve_forever()
 
 
 async def main():
-    if not TOKEN:
-        raise ValueError("BOT_TOKEN não encontrado no .env")
+    global TOKEN
+    global TARGET_CHAT_ID
 
-    await start_webserver()
-    await dp.start_polling(bot)
+    carregar_env_local()
+
+    TOKEN = os.getenv("BOT_TOKEN")
+    TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "-1001234567890"))
+
+    if not TOKEN:
+        raise ValueError("BOT_TOKEN não encontrado")
+
+    Thread(target=start_webserver, daemon=True).start()
+
+    await asyncio.gather(
+        polling(),
+        enviar_loop()
+    )
 
 
 if __name__ == "__main__":
