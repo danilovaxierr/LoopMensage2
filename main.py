@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 import aioschedule
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 from aiogram.filters import Command
@@ -81,10 +82,30 @@ async def stop(msg: Message):
     await msg.answer("⏹️ Loops OFF!")
 
 
+async def health(request):
+    return web.Response(text="Bot online!")
+
+
+async def start_webserver():
+    app = web.Application()
+    app.router.add_get("/", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.getenv("PORT", 10000))
+
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    logging.info(f"🌐 Web server rodando na porta {port}")
+
+
 async def main():
     if not TOKEN:
         raise ValueError("BOT_TOKEN não encontrado no .env")
 
+    await start_webserver()
     await dp.start_polling(bot)
 
 
